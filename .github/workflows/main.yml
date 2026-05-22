@@ -1,0 +1,82 @@
+name: VLESS XHTTP Tunnel (Relay)
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration_minutes:
+        description: 'مدت زمان اجرا (دقیقه)'
+        required: false
+        default: '360'
+
+jobs:
+  tunnel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install aiohttp==3.9.1
+
+      - name: Start Relay Proxy
+        run: |
+          python proxy.py &
+          echo $! > server.pid
+          sleep 8
+          echo "✅ Proxy started"
+
+      - name: Create Tunnel
+        run: |
+          echo "🔗 Creating tunnel with localhost.run..."
+          
+          ssh -o StrictHostKeyChecking=no \
+              -o ServerAliveInterval=30 \
+              -o ServerAliveCountMax=5 \
+              -o ExitOnForwardFailure=yes \
+              -R 80:localhost:8080 \
+              nokey@localhost.run 2>&1 | tee tunnel.log &
+
+          TUNNEL_PID=$!
+          echo $TUNNEL_PID > tunnel.pid
+
+          sleep 30
+
+          echo ""
+          echo "========== TUNNEL LOG =========="
+          cat tunnel.log
+          echo "================================"
+          echo ""
+
+          TUNNEL_URL=$(grep -oE 'https://[a-zA-Z0-9.-]+\.lhr\.life' tunnel.log | head -1 || true)
+
+          if [ -n "$TUNNEL_URL" ]; then
+            TUNNEL_HOST=$(echo "$TUNNEL_URL" | sed 's|https://||')
+            echo "✅ Tunnel created successfully!"
+            echo "🌍 Host: $TUNNEL_HOST"
+            echo ""
+            echo "Use this in your config:"
+            echo "host=$TUNNEL_HOST"
+            echo "sni=kubernetes.io"
+          else
+            echo "⚠️ Could not extract tunnel URL automatically."
+            echo "Please check the log above."
+          fi
+
+          # Keep tunnel alive
+          wait $TUNNEL_PID
+
+      - name: Cleanup
+        if: always()
+        run: |
+          [ -f server.pid ] && kill $(cat server.pid) 2>/dev/null || true
+          [ -f tunnel.pid ] && kill $(cat tunnel.pid) 2>/dev/null || true
+          echo "Cleanup done"
